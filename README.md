@@ -1,4 +1,4 @@
-# network-stack
+# Pi-hole + Unbound
 
 Pi-hole and Unbound in Docker Compose, for network-wide ad blocking and private DNS on a home network.
 
