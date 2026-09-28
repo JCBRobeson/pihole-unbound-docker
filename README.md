@@ -92,18 +92,21 @@ The machine running this stack should never use Pi-hole for its own DNS lookups.
 
 It's easy to create this loop without meaning to. Once your router hands out Pi-hole as the DNS server for your whole network, the host picks that up over DHCP like every other device.
 
-So I set the host's DNS manually to a public resolver and tell it to ignore DNS from DHCP. I use Quad9 (`9.9.9.9`, with `149.112.112.112` as backup), which validates DNSSEC and blocks known malware domains. That matters here because the host deliberately bypasses Pi-hole's own blocklists. Quad9's two addresses are separate IP ranges, so if one is unreachable the host falls back to the other.
+So I set the host's DNS manually to a public resolver and tell it to ignore DNS from DHCP. I use Quad9, which validates DNSSEC and blocks known malware domains. That matters here because the host deliberately bypasses Pi-hole's own blocklists. The host gets three servers: `9.9.9.9`, then `149.112.112.112` as a backup on a separate IP range, then `2620:fe::fe` over IPv6 as a last resort. Three is the most Linux will use; any extra `nameserver` lines are silently ignored.
 
 On a host that uses NetworkManager (RHEL, Fedora and most desktop distros):
 
     nmcli -g NAME,DEVICE connection show --active       # find your connection name
-    sudo nmcli connection modify <name> ipv4.dns "9.9.9.9,149.112.112.112" \
+    sudo nmcli connection modify <name> \
+        ipv4.dns "9.9.9.9,149.112.112.112" ipv6.dns "2620:fe::fe" \
         ipv4.ignore-auto-dns yes ipv6.ignore-auto-dns yes
-    sudo nmcli device reapply <device>
+    sudo nmcli connection up <name>
+
+`connection up` briefly drops the network while it reconnects. I use it instead of `nmcli device reapply` because reapply adds the new servers but doesn't forget ones already learned from the router.
 
 Then check it:
 
-    cat /etc/resolv.conf                          # only the Quad9 addresses
+    cat /etc/resolv.conf                          # only the three Quad9 addresses
     dig dnssec-failed.org | grep status           # SERVFAIL
 
 Restart the stack afterwards (`docker compose restart`). Containers copy the host's DNS settings when they start.
