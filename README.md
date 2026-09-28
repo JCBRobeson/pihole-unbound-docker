@@ -86,6 +86,32 @@ Two more things aren't in the compose file and need doing by hand: adding the bl
 
 Everything specific to your network lives in `.env`, so the compose file itself works as-is on any network.
 
+## Host DNS: don't point the server at itself
+
+The machine running this stack should never use Pi-hole for its own DNS lookups. If it does, a broken Pi-hole container takes the host's DNS down with it, and then the host can't pull images, install packages or reach GitHub to fix the problem. The thing that's broken is the thing you'd need to fix it.
+
+It's easy to create this loop without meaning to. Once your router hands out Pi-hole as the DNS server for your whole network, the host picks that up over DHCP like every other device.
+
+So I set the host's DNS manually to a public resolver and tell it to ignore DNS from DHCP. I use Quad9 (`9.9.9.9`, with `149.112.112.112` as backup), which validates DNSSEC and blocks known malware domains. That matters here because the host deliberately bypasses Pi-hole's own blocklists. Quad9's two addresses are separate IP ranges, so if one is unreachable the host falls back to the other.
+
+On a host that uses NetworkManager (RHEL, Fedora and most desktop distros):
+
+    nmcli -g NAME,DEVICE connection show --active       # find your connection name
+    sudo nmcli connection modify <name> ipv4.dns "9.9.9.9,149.112.112.112" \
+        ipv4.ignore-auto-dns yes ipv6.ignore-auto-dns yes
+    sudo nmcli device reapply <device>
+
+Then check it:
+
+    cat /etc/resolv.conf                          # only the Quad9 addresses
+    dig dnssec-failed.org | grep status           # SERVFAIL
+
+Restart the stack afterwards (`docker compose restart`). Containers copy the host's DNS settings when they start.
+
+If your host uses something other than NetworkManager, like netplan or systemd-networkd, the idea is the same: set the DNS servers explicitly and ignore the ones DHCP hands out.
+
+This only applies to the machine running Pi-hole. Every other device on the network should use Pi-hole normally.
+
 ## Blocklists
 
 Pi-hole keeps its blocklists in its own database (`pihole/gravity.db`), not in the compose file. So you add them once through the dashboard, and again after any fresh rebuild. To avoid redoing it, back up your setup from **Settings → Teleporter** and restore from the same page.
@@ -219,7 +245,6 @@ Each service gets its own subfolder. I keep the project in `/srv/network-stack`.
 ## Known limitations
 
 - **One server means one point of failure.** If it goes down, DNS stops working for every device using it.
-- **Keep the server's own DNS pointed at your router**, not at Pi-hole. Otherwise a broken container could stop Docker from pulling the images it needs to fix itself.
 - **IPv6 can bypass Pi-hole.** If your router advertises its own IPv6 DNS server, devices on automatic DNS may send some lookups there. Until your router can hand out Pi-hole's address, set DNS manually on each device and confirm with the leak test.
 - **Docker's SELinux support is off on my host**, so the bind mounts don't use `:z`/`:Z` labels. If you enable it, add them.
 - **Images use `:latest`.** Pin versions if you want updates to be deliberate.
@@ -232,29 +257,3 @@ Each service gets its own subfolder. I keep the project in `/srv/network-stack`.
 - Consider dropping StevenBlack, since HaGeZi's wildcard rules already cover most of it
 - Add a Caddy reverse proxy to this project (as `caddy/`)
 - Move routing and DHCP to pfSense: put the ISP gateway in passthrough mode, have pfSense hand out Pi-hole as DNS over both IPv4 and IPv6, enable IPv6 on the Docker network, and block outbound DNS (ports 53 and 853) from everything except Pi-hole
-
-## Host DNS: don't point the server at itself
-
-The machine running this stack should never use Pi-hole for its own DNS lookups. If it does, a broken Pi-hole container takes the host's DNS down with it, and then the host can't pull images, install packages or reach GitHub to fix the problem. The thing that's broken is the thing you'd need to fix it.
-
-It's easy to create this loop without meaning to. Once your router hands out Pi-hole as the DNS server for your whole network, the host picks that up over DHCP like every other device.
-
-So I set the host's DNS manually to a public resolver and tell it to ignore DNS from DHCP. I use Quad9 (`9.9.9.9`, with `149.112.112.112` as backup), which validates DNSSEC and blocks known malware domains. That matters here because the host deliberately bypasses Pi-hole's own blocklists. Quad9's two addresses are separate IP ranges, so if one is unreachable the host falls back to the other.
-
-On a host that uses NetworkManager (RHEL, Fedora and most desktop distros):
-
-    nmcli -g NAME,DEVICE connection show --active       # find your connection name
-    sudo nmcli connection modify <name> ipv4.dns "9.9.9.9,149.112.112.112" \
-        ipv4.ignore-auto-dns yes ipv6.ignore-auto-dns yes
-    sudo nmcli device reapply <device>
-
-Then check it:
-
-    cat /etc/resolv.conf                          # only the Quad9 addresses
-    dig dnssec-failed.org | grep status           # SERVFAIL
-
-Restart the stack afterwards (`docker compose restart`). Containers copy the host's DNS settings when they start.
-
-If your host uses something other than NetworkManager, like netplan or systemd-networkd, the idea is the same: set the DNS servers explicitly and ignore the ones DHCP hands out.
-
-This only applies to the machine running Pi-hole. Every other device on the network should use Pi-hole normally.
