@@ -1,0 +1,14 @@
+# Deny by default: ignore everything in this repo...
+*
+
+# ...then allow only what is meant to be public.
+!.gitignore
+!README.md
+!docker-compose.yaml
+!.env.example
+
+# Unbound override config. Git can't allow a file inside an ignored
+# folder, so each folder level has to be allowed first.
+!unbound/
+!unbound/custom.conf.d/
+!unbound/custom.conf.d/*.conf
