@@ -232,3 +232,29 @@ Each service gets its own subfolder. I keep the project in `/srv/network-stack`.
 - Consider dropping StevenBlack, since HaGeZi's wildcard rules already cover most of it
 - Add a Caddy reverse proxy to this project (as `caddy/`)
 - Move routing and DHCP to pfSense: put the ISP gateway in passthrough mode, have pfSense hand out Pi-hole as DNS over both IPv4 and IPv6, enable IPv6 on the Docker network, and block outbound DNS (ports 53 and 853) from everything except Pi-hole
+
+## Host DNS: don't point the server at itself
+
+The machine running this stack should never use Pi-hole for its own DNS lookups. If it does, a broken Pi-hole container takes the host's DNS down with it, and then the host can't pull images, install packages or reach GitHub to fix the problem. The thing that's broken is the thing you'd need to fix it.
+
+It's easy to create this loop without meaning to. Once your router hands out Pi-hole as the DNS server for your whole network, the host picks that up over DHCP like every other device.
+
+So I set the host's DNS manually to a public resolver and tell it to ignore DNS from DHCP. I use Quad9 (`9.9.9.9`, with `149.112.112.112` as backup), which validates DNSSEC and blocks known malware domains. That matters here because the host deliberately bypasses Pi-hole's own blocklists. Quad9's two addresses are separate IP ranges, so if one is unreachable the host falls back to the other.
+
+On a host that uses NetworkManager (RHEL, Fedora and most desktop distros):
+
+    nmcli -g NAME,DEVICE connection show --active       # find your connection name
+    sudo nmcli connection modify <name> ipv4.dns "9.9.9.9,149.112.112.112" \
+        ipv4.ignore-auto-dns yes ipv6.ignore-auto-dns yes
+    sudo nmcli device reapply <device>
+
+Then check it:
+
+    cat /etc/resolv.conf                          # only the Quad9 addresses
+    dig dnssec-failed.org | grep status           # SERVFAIL
+
+Restart the stack afterwards (`docker compose restart`). Containers copy the host's DNS settings when they start.
+
+If your host uses something other than NetworkManager, like netplan or systemd-networkd, the idea is the same: set the DNS servers explicitly and ignore the ones DHCP hands out.
+
+This only applies to the machine running Pi-hole. Every other device on the network should use Pi-hole normally.
