@@ -6,6 +6,7 @@
 !README.md
 !docker-compose.yaml
 !.env.example
+!LICENSE
 
 # Unbound override config. Git can't allow a file inside an ignored
 # folder, so each folder level has to be allowed first.
