@@ -83,6 +83,7 @@ Two more things aren't in the compose file and need doing by hand: adding the bl
 | `LAN_SUBNET` | `192.168.1.0/24` | Your home network range, in CIDR notation |
 | `LAN_GATEWAY` | `192.168.1.254` | Your router, which hands out IP addresses and knows device names |
 | `LAN_DOMAIN` | `lan` | The local domain your router gives out. On NetworkManager systems: `nmcli device show \| grep -i domain`. Otherwise, check your router's settings. |
+| `PIHOLE_APP_SUDO` | `false` | Leave it `false` unless you run two Pi-holes and sync them. Then set `true` on the backup only. See [Running a second Pi-hole](#running-a-second-pi-hole). |
 
 Everything specific to your network lives in `.env`, so the compose file itself works as-is on any network.
 
@@ -170,6 +171,7 @@ docker exec pihole pihole-FTL --config dns.revServers        # your conditional 
 docker exec pihole pihole-FTL --config database.maxDBdays    # 14
 dig @127.0.0.1 -x <a-device-ip> +short                        # that device's name, from your router
 ```
+`-x` is a reverse lookup: you give it an IP and get back a name. It only works for devices that got their address from your router over DHCP. Anything with a static IP, like the server itself, comes back blank because the router never learned its name. Pi-hole's **Settings → Local DNS Records** fixes that.
 
 For comparison, try `dig @<your-router-ip> dnssec-failed.org | grep status`. Many ISP routers return `NOERROR`, meaning they hand out the forged answer. Mine did.
 
@@ -194,6 +196,7 @@ Every `FTLCONF_<section>_<key>` variable in the compose file maps onto Pi-hole's
 | `FTLCONF_dns_upstreams: '172.28.0.2#53'` | Unbound is the only upstream. Adding a second, like `1.1.1.1`, would split queries between them and send some to a public resolver, which defeats the point. |
 | `FTLCONF_dns_listeningMode: 'ALL'` | Required with Docker bridge networking. Queries reach Pi-hole through Docker's NAT, not from a "local" network, so the default mode would refuse them. |
 | `FTLCONF_webserver_api_password` from `.env` | Keeps the password out of the compose file and out of Git. |
+| `FTLCONF_webserver_api_app_sudo` from `.env`, default `false` | App passwords can read everything but change nothing unless this is on. Unset, it falls back to `false`, which is Pi-hole's own default. Only a backup that a sync tool writes to needs `true`. |
 | NTP turned off (`FTLCONF_ntp_*: 'false'`) | The host already keeps time (`chronyd` in my case). Pi-hole shouldn't fight it. |
 | `cap_add: SYS_NICE` only | `SYS_TIME` isn't needed with NTP off. `NET_ADMIN` would only be needed if Pi-hole did DHCP. |
 | Pi-hole's own DNSSEC off | Unbound already validates and refuses forged answers. Turning it on in Pi-hole too only adds the `ad` flag to replies and BOGUS labels in the query log. There's no extra protection. |
@@ -245,12 +248,36 @@ Each service gets its own subfolder. I keep the project in `/srv/network-stack`.
 - Home network addresses like `192.168.x.x` aren't sensitive, but they still live in `.env` so the compose file works for anyone.
 - Nothing in this repo should ever contain a public IP address, a MAC address or a credential.
 
+## Running a second Pi-hole?
+
+One Pi-hole is one point of failure. I run this same stack on two machines, a Raspberry Pi as the primary and a VM as the backup, and give my devices both addresses. If one stops answering, devices switch to the other on their own.
+
+The two Pi-holes don't share anything by themselves, so I copy the lists from the primary to the backup with [nebula-sync](https://github.com/lovelaze/nebula-sync). It runs in its own container on the primary, outside this project, since most people using this repo run one Pi-hole and don't need it. What I learned setting it up:
+
+- **It's one-way.** Make every change on the primary. Each sync replaces the backup's lists, so anything added only on the backup disappears. Before the first sync, copy any allow/deny entries that exist only on the backup over to the primary.
+- **Sync lists, not settings.** I use selective sync (`FULL_SYNC=false`) with only the `SYNC_GRAVITY_*` options on: groups, blocklists, allow/deny entries and clients, plus `RUN_GRAVITY=true` so the backup rebuilds its list database afterwards. Settings stay owned by each machine's compose file. A full sync would try to overwrite settings this compose file locks.
+- **Use app passwords, not your login.** In each Pi-hole: **Settings → Web interface / API**, switch from **Basic** to **Expert**, then **Configure app password**. It's shown once, so put it straight into a password manager. You can revoke it any time without changing your real login.
+- **Set `PIHOLE_APP_SUDO=true` in the backup's `.env`, and only there.** By default an app password can read but not change anything, so the sync fails with a `403` the moment it writes to the backup. This setting lets app passwords make changes. Keep it `false` on the primary, which only ever gets read.
+- **The passwords cross your network unencrypted.** The dashboards here run on plain HTTP, so every sync sends both app passwords across your LAN in the clear. On a home network I'm accepting that for now. Putting the dashboards behind a reverse proxy with TLS fixes it.
+
 ## Known limitations
 
-- **One server means one point of failure.** If it goes down, DNS stops working for every device using it.
+- **One server means one point of failure.** If it goes down, DNS stops working for every device using it. A second copy fixes that: see [Running a second Pi-hole](#running-a-second-pi-hole).
 - **IPv6 can bypass Pi-hole.** If your router advertises its own IPv6 DNS server, devices on automatic DNS may send some lookups there. Until your router can hand out Pi-hole's address, set DNS manually on each device and confirm with the leak test.
 - **Docker's SELinux support is off on my host**, so the bind mounts don't use `:z`/`:Z` labels. If you enable it, add them.
 - **Images use `:latest`.** Pin versions if you want updates to be deliberate.
+
+## Running a second Pi-hole?
+
+One Pi-hole is one point of failure. I run this same stack on two machines, a Raspberry Pi as the primary and a VM as the backup, and give my devices both addresses. If one stops answering, devices switch to the other on their own.
+
+The two Pi-holes don't share anything by themselves, so I copy the lists from the primary to the backup with nebula-sync. It runs in its own container on the primary, outside this project, since most people using this repo run one Pi-hole and don't need it. What I learned setting it up:
+
+It's one-way. Make every change on the primary. Each sync replaces the backup's lists, so anything added only on the backup disappears. Before the first sync, copy any allow/deny entries that exist only on the backup over to the primary.
+Sync lists, not settings. I use selective sync (FULL_SYNC=false) with only the SYNC_GRAVITY_* options on: groups, blocklists, allow/deny entries and clients, plus RUN_GRAVITY=true so the backup rebuilds its list database afterwards. Settings stay owned by each machine's compose file. A full sync would try to overwrite settings this compose file locks.
+Use app passwords, not your login. In each Pi-hole: Settings → Web interface / API, switch from Basic to Expert, then Configure app password. It's shown once, so put it straight into a password manager. You can revoke it any time without changing your real login.
+Set PIHOLE_APP_SUDO=true in the backup's .env, and only there. By default an app password can read but not change anything, so the sync fails with a 403 the moment it writes to the backup. This setting lets app passwords make changes. Keep it false on the primary, which only ever gets read.
+The passwords cross your network unencrypted. The dashboards here run on plain HTTP, so every sync sends both app passwords across your LAN in the clear. On a home network I'm accepting that for now. Putting the dashboards behind a reverse proxy with TLS fixes it.
 
 ## Roadmap
 

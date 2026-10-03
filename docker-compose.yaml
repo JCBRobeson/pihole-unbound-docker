@@ -25,6 +25,9 @@ services:
       TZ: '${TZ}'
       # Set a password to access the web interface. Not setting one will result in a random password being assigned
       FTLCONF_webserver_api_password: '${PIHOLE_PASSWORD}'
+      # Allow app passwords to change settings/import data. Only set true on a
+      # replica that a sync tool (e.g. nebula-sync) writes to. Default: false
+      FTLCONF_webserver_api_app_sudo: '${PIHOLE_APP_SUDO:-false}'
       # If using Docker's default `bridge` network setting the dns listening mode should be set to 'ALL'
       FTLCONF_dns_listeningMode: 'ALL'
       # Upstream = Unbound's static IP on dns-net. No public resolvers alongside it,
