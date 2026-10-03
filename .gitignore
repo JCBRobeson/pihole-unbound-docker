@@ -4,6 +4,7 @@
 # ...then allow only what is meant to be public.
 !.gitignore
 !README.md
+!README-RBP5.md
 !docker-compose.yaml
 !.env.example
 !LICENSE
