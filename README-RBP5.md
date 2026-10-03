@@ -467,6 +467,149 @@ sudo docker compose start pihole
 
 What I saw: during the switch, one site briefly showed "you're using an ad blocker." Its scripts asked the stopped Pi-hole for addresses, got no answer, and failed while the phone was still deciding that server was dead, and the site's ad-blocker check read failed scripts as blocked ones. A refresh fixed it. Devices do fail over, but not instantly. Smoothing that out is what a floating IP is for (see the roadmap).
 
+## 15. Keep the backup in sync (nebula-sync)
+
+Two Pi-holes don't share anything on their own. Add an allow entry on one and the other still blocks that site, so your devices get different answers depending on which server they happen to ask. [nebula-sync](https://github.com/lovelaze/nebula-sync) fixes that by copying the lists from this Pi to the backup every night.
+
+It runs here, on the Pi, in its own folder. The Pi is the source of truth, and if the Pi is dead there's nothing to sync from anyway. It's not part of the pihole-unbound-docker repo because most people running that have one Pi-hole and don't need it.
+
+**It's one-way.** Make every change on this Pi. Each sync replaces the backup's lists, so anything added only on the backup disappears. Before the first sync, open **Domains** on both dashboards and copy anything that exists only on the backup over to the Pi.
+
+### App passwords
+
+nebula-sync has to log into both Pi-holes. Instead of giving it your real logins, make each Pi-hole an app password: **Settings → Web interface / API**, switch from **Basic** to **Expert**, then **Configure app password**.
+
+- It's shown once. Put it straight into a password manager, named so you know what it's for (`<box> – Pi-hole app password (nebula-sync)`).
+- Don't paste it into chats, notes or commands. A password typed into a command ends up in your shell history.
+- If it ever leaks, generate a new one. That kills the old one, and your real login doesn't change.
+
+It doesn't make a leak less bad, since an app password can do everything your login can through the API. The point is separation: the robot gets its own credential, which you can revoke on its own.
+
+By default an app password can read everything but change nothing. The backup gets written to, so it needs app passwords allowed to make changes. In the pihole-unbound-docker repo that's one variable, set in the **backup's** `.env` only:
+
+```
+PIHOLE_APP_SUDO=true
+```
+
+Then `sudo docker compose up -d` on the backup and confirm with `sudo docker exec pihole pihole-FTL --config webserver.api.app_sudo` (`true`). Leave it unset on this Pi: it defaults to `false`, and this Pi only ever gets read. I skipped this the first time and the sync failed with a `403` (forbidden) every run.
+
+This also means the backup's app password lives on this Pi. That's the price of a sync tool, and the Pi is the more locked-down of the two machines.
+
+### The folder and `.env`
+
+```bash
+sudo mkdir /srv/nebula-sync
+sudo chown youruser:youruser /srv/nebula-sync
+cd /srv/nebula-sync
+touch .env
+chmod 600 .env
+nano .env
+```
+
+`touch` and `chmod 600` come **before** `nano`, so the file is private before any password goes into it.
+
+```
+PRIMARY_URL=http://192.168.1.12:8053
+PRIMARY_APP_PASSWORD=
+REPLICA_URL=http://192.168.1.11:8053
+REPLICA_APP_PASSWORD=
+TZ=America/Chicago
+```
+
+The URLs are the dashboard address without `/admin`; nebula-sync talks to the API underneath it. Fill in each app password after its `=`, with no spaces and no quotes. My backup is `192.168.1.11`; use your own.
+
+Check it without printing the passwords:
+
+```bash
+ls -l .env                          # -rw-------
+grep -c '_APP_PASSWORD=.\+' .env    # 2, meaning both are filled in
+cut -d= -f1 .env                    # just the variable names
+```
+
+### The compose file
+
+```yaml
+services:
+  nebula-sync:
+    image: ghcr.io/lovelaze/nebula-sync:v0.11.2
+    container_name: nebula-sync
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+    environment:
+      PRIMARY: '${PRIMARY_URL}|${PRIMARY_APP_PASSWORD}'
+      REPLICAS: '${REPLICA_URL}|${REPLICA_APP_PASSWORD}'
+      TZ: '${TZ}'
+      CRON: '0 2 * * *'
+      FULL_SYNC: 'false'
+      RUN_GRAVITY: 'true'
+      # Lists, allow/deny entries, groups, clients: primary -> backup
+      SYNC_GRAVITY_GROUP: 'true'
+      SYNC_GRAVITY_AD_LIST: 'true'
+      SYNC_GRAVITY_AD_LIST_BY_GROUP: 'true'
+      SYNC_GRAVITY_DOMAIN_LIST: 'true'
+      SYNC_GRAVITY_DOMAIN_LIST_BY_GROUP: 'true'
+      SYNC_GRAVITY_CLIENT: 'true'
+      SYNC_GRAVITY_CLIENT_BY_GROUP: 'true'
+      # Settings stay owned by each box's compose file (SYNC_CONFIG_* default false).
+      # Enable once Local DNS records exist, to sync ONLY those records:
+      # SYNC_CONFIG_DNS: 'true'
+      # SYNC_CONFIG_DNS_INCLUDE: 'hosts,cnameRecords'
+```
+
+| Setting | Why |
+|---|---|
+| Pinned version (`v0.11.2`), not `:latest` | Same image on every rebuild. Updates happen when I change this line, after reading the release notes. |
+| `restart: unless-stopped` | Comes back after reboots and crashes, stays down if I stop it on purpose. |
+| `no-new-privileges` | Nothing inside the container can gain more privileges than it started with. nebula-sync never needs to, so it's free protection. |
+| Log limits | Docker's default log has no size cap. On an SD card, an ever-growing log is wasted wear and eventually a full disk. |
+| No `ports:` | nebula-sync only connects out to the two Pi-holes. Nothing can connect to it. |
+| Passwords glued together from `.env` | nebula-sync wants `url\|password`. Keeping the pieces separate in `.env` keeps every site-specific value and secret out of the compose file. |
+| `CRON: '0 2 * * *'` | Minute, hour, day, month, weekday: 2:00 AM every day. The backup being up to a day behind is fine. Daylight saving skips 2 AM one night each March, so that night's sync may run late or not at all, which is harmless. |
+| `FULL_SYNC: 'false'` | Selective sync. A full sync clones every setting, including ones the compose file locks on each box. Each setting should have one owner: compose owns settings, nebula-sync owns lists. |
+| `RUN_GRAVITY: 'true'` | The backup rebuilds its list database after a sync, so new lists actually take effect. It runs on the backup, not on this SD card. |
+| `SYNC_GRAVITY_*` | Groups have to sync, because lists and devices are attached to groups. Then blocklists, allow/deny entries and device assignments, each with their group links. |
+| Left off | DHCP leases (Pi-hole isn't the DHCP server) and every `SYNC_CONFIG_*` section. DHCP settings are the dangerous one: syncing them could switch DHCP on for two servers at once, and two DHCP servers on one network hand out conflicting addresses. |
+
+The commented-out lines are for later. Pi-hole v6 keeps Local DNS records in its settings, not with the lists, so when I add names for my servers, that filter syncs those records and nothing else.
+
+Validate without printing the passwords. The full `docker compose config` output includes them, so only grep it:
+
+```bash
+sudo docker compose config --quiet && echo OK
+sudo docker compose config | grep -E 'image|CRON|FULL_SYNC|RUN_GRAVITY|TZ'
+```
+
+### Run it
+
+```bash
+sudo docker compose pull
+sudo docker compose up -d
+sudo docker logs -f nebula-sync     # Ctrl+C stops watching; the container keeps running
+```
+
+It syncs once on startup, then waits for the schedule. Success ends with `Sync completed`. A line starting with `FTL` is a fatal error, and with `restart: unless-stopped` it'll crash, restart and retry every few seconds. Stop it with `sudo docker compose stop` while you fix the problem.
+
+Since it syncs on startup, `sudo docker compose restart` is the "sync now" button.
+
+### Prove it works both ways
+
+"Sync completed" is nebula-sync's opinion. This proves it:
+
+1. On this Pi's dashboard, **Domains** → add `nebula-test.example.com` as an exact **deny** entry. `example.com` is reserved for testing, so it can't be a real site.
+2. `sudo docker compose restart` here.
+3. On the backup: `dig @127.0.0.1 nebula-test.example.com +short` → `0.0.0.0`. The backup is blocking something you only added on the Pi.
+4. Delete the entry on the Pi, `restart` again, and rerun the `dig` on the backup → empty answer.
+
+Step 4 matters as much as step 3. A sync that only adds would slowly fill the backup with entries you'd deleted.
+
+The dashboards are plain HTTP, so every sync sends both app passwords across the LAN unencrypted. I'm accepting that on a home network until Caddy puts HTTPS in front of them.
+
 ## Maintenance
 
 **Automatic, daily:** Debian security fixes and point releases. Never reboots.
@@ -478,6 +621,8 @@ sudo apt update && sudo apt full-upgrade && sudo reboot
 ```
 
 This picks up everything the automatic updates skip: the Pi's kernel and firmware, and Docker. A Docker update restarts every container, including Pi-hole, so do it when a short DNS blip won't bother anyone.
+
+nebula-sync is pinned, so it never updates by itself. Every few months, check its [releases page](https://github.com/lovelaze/nebula-sync/releases), read the notes, change the version in the compose file, then `sudo docker compose pull && sudo docker compose up -d`.
 
 Occasionally check power and heat with `vcgencmd get_throttled` and `vcgencmd measure_temp`.
 
@@ -503,12 +648,13 @@ The RTC battery is a nice extra, mainly for a Pi that's been unplugged for days.
 - Docker from its signed official repository
 - Static address and a public validating resolver for the host's own DNS, independent of the router and of Pi-hole
 - Secrets in `.env` (mode 600), never committed; a unique admin password per Pi-hole
+- nebula-sync uses revocable app passwords, not the real logins; app passwords can only change settings on the backup, and stay read-only on this Pi
+- nebula-sync publishes no ports, can't gain privileges, and runs a pinned version
 - Git can't stamp a guessed identity onto commits
 - Nothing forwarded from the router
 
 ## Roadmap
 
-- Keep the two Pi-holes in sync automatically (nebula-sync), with this Pi as the source of truth
 - Floating IPs with keepalived: one shared address for DNS, so devices only know one server and failover takes seconds. Separate floating IPs per service (DNS, and Caddy later), each with its own health check, so each one fails over independently.
 - Local DNS records for the statically addressed servers
 - Uptime Kuma, to monitor the other servers from outside them
