@@ -467,6 +467,24 @@ sudo docker compose start pihole
 
 What I saw: during the switch, one site briefly showed "you're using an ad blocker." Its scripts asked the stopped Pi-hole for addresses, got no answer, and failed while the phone was still deciding that server was dead, and the site's ad-blocker check read failed scripts as blocked ones. A refresh fixed it. Devices do fail over, but not instantly. Smoothing that out is what a floating IP is for (see the roadmap).
 
+**Check every device you set up by hand.** Two things bit me:
+
+- **Typos.** I typed `192.1.168.12` instead of `192.168.1.12` on my PC. That's not a home address, it's a public range someone else owns, so every lookup would have gone to a stranger on the internet. Read the numbers back before you hit Save.
+- **Windows keeps IPv6 DNS on automatic.** Setting IPv4 DNS by hand doesn't touch IPv6, and Windows prefers the router's IPv6 DNS server, so lookups skip Pi-hole entirely. An iPhone's manual DNS replaces both, so phones don't have this problem. On Windows, check with:
+
+```powershell
+  Get-DnsClientServerAddress -InterfaceAlias Wi-Fi
+```
+
+  If the IPv6 line lists an address, that's the router, and it's a bypass. Until my router can hand out Pi-hole's IPv6 address, I turn IPv6 off on that adapter (PowerShell **as Administrator**):
+
+```powershell
+  Disable-NetAdapterBinding -Name "Wi-Fi" -ComponentID ms_tcpip6
+  ipconfig /flushdns
+```
+
+  Every site still works over IPv4. It only covers that adapter: plug in Ethernet and you need to do the same for it. To undo later: `Enable-NetAdapterBinding -Name "Wi-Fi" -ComponentID ms_tcpip6`.
+
 ## 15. Keep the backup in sync (nebula-sync)
 
 Two Pi-holes don't share anything on their own. Add an allow entry on one and the other still blocks that site, so your devices get different answers depending on which server they happen to ask. [nebula-sync](https://github.com/lovelaze/nebula-sync) fixes that by copying the lists from this Pi to the backup every night.
@@ -556,10 +574,10 @@ services:
       SYNC_GRAVITY_DOMAIN_LIST_BY_GROUP: 'true'
       SYNC_GRAVITY_CLIENT: 'true'
       SYNC_GRAVITY_CLIENT_BY_GROUP: 'true'
-      # Settings stay owned by each box's compose file (SYNC_CONFIG_* default false).
-      # Enable once Local DNS records exist, to sync ONLY those records:
-      # SYNC_CONFIG_DNS: 'true'
-      # SYNC_CONFIG_DNS_INCLUDE: 'hosts,cnameRecords'
+      # Sync ONLY local DNS records (A + CNAME); all other settings stay per-box.
+      # Added in chapter 16. Leave these two lines out until you have records.
+      SYNC_CONFIG_DNS: 'true'
+      SYNC_CONFIG_DNS_INCLUDE: 'hosts,cnameRecords'
 ```
 
 | Setting | Why |
@@ -576,7 +594,7 @@ services:
 | `SYNC_GRAVITY_*` | Groups have to sync, because lists and devices are attached to groups. Then blocklists, allow/deny entries and device assignments, each with their group links. |
 | Left off | DHCP leases (Pi-hole isn't the DHCP server) and every `SYNC_CONFIG_*` section. DHCP settings are the dangerous one: syncing them could switch DHCP on for two servers at once, and two DHCP servers on one network hand out conflicting addresses. |
 
-The commented-out lines are for later. Pi-hole v6 keeps Local DNS records in its settings, not with the lists, so when I add names for my servers, that filter syncs those records and nothing else.
+The last two lines come from chapter 16. Pi-hole v6 keeps Local DNS records in its settings, not with the lists, so that filter syncs those records and nothing else.
 
 Validate without printing the passwords. The full `docker compose config` output includes them, so only grep it:
 
@@ -609,6 +627,91 @@ Since it syncs on startup, `sudo docker compose restart` is the "sync now" butto
 Step 4 matters as much as step 3. A sync that only adds would slowly fill the backup with entries you'd deleted.
 
 The dashboards are plain HTTP, so every sync sends both app passwords across the LAN unencrypted. I'm accepting that on a home network until Caddy puts HTTPS in front of them.
+
+## 16. Names for the servers (Local DNS records)
+
+My phone and laptop get names from the router, because the router handed them their addresses over DHCP. The servers have static addresses, so the router either never learned their names or only remembers them from before they went static. That memory goes away with a router reset or a router swap. I want names that don't depend on the ISP's box.
+
+Pi-hole can answer names itself. A **Local DNS record** is an entry in Pi-hole's own phone book: when a device asks for that name, Pi-hole answers straight away and never asks Unbound or the internet. Pi-hole also answers the reverse lookup (IP to name) for every record automatically.
+
+### Picking the suffix
+
+A name like `lantern` needs a domain after it, and that domain has to be one that can never exist on the internet. Otherwise your local answer could hijack a real site, or your lookups could leak out to whoever owns it.
+
+| Option | Verdict |
+|---|---|
+| `home.arpa` | The official reserved name for home networks (RFC 8375). What I use. |
+| `.internal` | Reserved by ICANN in 2024 for private networks. Also safe, and shorter. |
+| `.lan`, `.home`, `.corp` | Common in guides, but not officially reserved. Skip. |
+| `.local` | Reserved for mDNS (Bonjour, AirPlay, printers). Using it in normal DNS breaks those. Never use it. |
+| Your ISP's domain (e.g. what your router hands out) | A real domain someone else owns, and it disappears when you change routers. Skip. |
+| A subdomain of a domain you own | Also safe, and it can get real HTTPS certificates later. Costs a domain. |
+
+### Add the records (on this Pi only)
+
+In the Pi's dashboard: **Settings → Local DNS Records**. These are **A records** (name → IPv4 address). Get the IPs exactly right: a wrong record sends you to the wrong machine.
+
+| Domain | IP |
+|---|---|
+| `pve.home.arpa` | `192.168.1.10` |
+| `ludmila.home.arpa` | `192.168.1.11` |
+| `lantern.home.arpa` | `192.168.1.12` |
+
+Swap in your own names and addresses. Add them on the primary only. The sync (next part) copies them to the backup, so there's one source of truth.
+
+There's also a **CNAME** section on the same page: an alias that points one name at another name, never at an IP (`dns.home.arpa` → `lantern.home.arpa`). If a machine's address changes, you update one A record and every alias follows. In Pi-hole, a CNAME's target has to be one of your local records. I'll use these for the reverse proxy later.
+
+Test on the Pi:
+
+```bash
+dig @127.0.0.1 pve.home.arpa +short        # 192.168.1.10
+dig @127.0.0.1 -x 192.168.1.10 +short      # pve.home.arpa.
+```
+
+That second one used to come back blank. The trailing dot just means a complete name.
+
+### Sync the records to the backup
+
+Pi-hole v6 keeps Local DNS records in its **settings**, not with the lists, so the list sync from chapter 15 doesn't carry them. Add these two lines to the nebula-sync compose file:
+
+```yaml
+      # Sync ONLY local DNS records (A + CNAME); all other settings stay per-box.
+      SYNC_CONFIG_DNS: 'true'
+      SYNC_CONFIG_DNS_INCLUDE: 'hosts,cnameRecords'
+```
+
+`SYNC_CONFIG_DNS` opens the DNS settings section to syncing, and `INCLUDE` narrows it to just the two record lists. Without the filter, it would copy the whole DNS section, including the upstream and listening settings.
+
+This is the first time the sync writes **settings** to the backup, so I proved the filter works. Before the sync, on the backup:
+
+```bash
+sudo docker exec pihole pihole-FTL --config dns.upstreams
+sudo docker exec pihole pihole-FTL --config dns.listeningMode
+sudo docker exec pihole pihole-FTL --config dns.revServers
+dig @127.0.0.1 pve.home.arpa +short        # empty: not synced yet
+```
+
+Then on the Pi, apply it. The environment changed, so the container is recreated and syncs on startup:
+
+```bash
+sudo docker compose up -d
+sudo docker logs --tail 10 nebula-sync     # Sync completed
+```
+
+Back on the backup, `dig @127.0.0.1 pve.home.arpa +short` now returns `192.168.1.10`, and the three `--config` outputs are identical to before. The records arrived, and nothing else changed.
+
+### Using the names
+
+Your devices have to use the Pi-holes for DNS, or the names don't exist (your router has never heard of `home.arpa`). See the Windows IPv6 note in chapter 14 if a name works with `Resolve-DnsName <name> -Server <pi-ip>` but not without it.
+
+SSH remembers servers by the name you typed, so the first `ssh youruser@lantern.home.arpa` asks "are you sure?" again. Don't type `yes` on autopilot. Modern SSH tells you whether it already trusts that key under another name:
+
+```
+This host key is known by the following other names/addresses:
+    ~/.ssh/known_hosts:12: 192.168.1.12
+```
+
+Same key means same machine. Say yes. If that line isn't there, compare fingerprints first with `ssh-keygen -lF 192.168.1.12`.
 
 ## Maintenance
 
@@ -656,7 +759,6 @@ The RTC battery is a nice extra, mainly for a Pi that's been unplugged for days.
 ## Roadmap
 
 - Floating IPs with keepalived: one shared address for DNS, so devices only know one server and failover takes seconds. Separate floating IPs per service (DNS, and Caddy later), each with its own health check, so each one fails over independently.
-- Local DNS records for the statically addressed servers
 - Uptime Kuma, to monitor the other servers from outside them
 - A Tailscale node, as a second way in when the main server is down
 - A UPS with NUT, so everything shuts down cleanly on low battery, with the Pi as the NUT server since it outlasts everything else
