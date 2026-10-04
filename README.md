@@ -266,6 +266,7 @@ The two Pi-holes don't share anything by themselves, so I copy the lists from th
 - **IPv6 can bypass Pi-hole.** If your router advertises its own IPv6 DNS server, devices on automatic DNS may send some lookups there. Until your router can hand out Pi-hole's address, set DNS manually on each device and confirm with the leak test.
 - **Docker's SELinux support is off on my host**, so the bind mounts don't use `:z`/`:Z` labels. If you enable it, add them.
 - **Images use `:latest`.** Pin versions if you want updates to be deliberate.
+- **IPv6 can bypass Pi-hole.** If your router advertises its own IPv6 DNS server, devices on automatic DNS may send some lookups there. Setting DNS by hand doesn't always fix it: on Windows, manual IPv4 DNS leaves IPv6 DNS on automatic, and Windows prefers the router's IPv6 server. Check with `Get-DnsClientServerAddress`. If the IPv6 line lists your router, that device is skipping Pi-hole. Until your router can hand out Pi-hole's IPv6 address, turn IPv6 off on that adapter (as Administrator: `Disable-NetAdapterBinding -Name "Wi-Fi" -ComponentID ms_tcpip6`; `Enable-NetAdapterBinding` undoes it). iPhone manual DNS replaces both, so phones aren't affected the same way. Confirm every device with the leak test.
 
 ## Running a second Pi-hole?
 
