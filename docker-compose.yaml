@@ -7,7 +7,7 @@ services:
       # DNS Ports
       - "53:53/tcp"
       - "53:53/udp"
-      # Web UI on host 8053 (8080 = qBittorrent via gluetun, 8090 = Heimdall)
+      # Web UI on host 8053
       # Host 80/443 kept free for Caddy
       - "8053:80/tcp"
       # Dropped: Pi-hole's self-signed HTTPS. Host 443 reserved for Caddy,

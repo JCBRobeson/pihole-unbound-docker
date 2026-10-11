@@ -76,12 +76,14 @@ Two more things aren't in the compose file and need doing by hand: adding the bl
 
 ### `.env` values
 
+Example addresses use 192.0.2.0/24, a range reserved for documentation. Swap in your own.
+
 | Variable | Example | What it's for |
 |---|---|---|
 | `PIHOLE_PASSWORD` | `change-me` | Password for the web dashboard |
 | `TZ` | `Etc/UTC` | Time zone for Pi-hole's logs ([list of names](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones)) |
-| `LAN_SUBNET` | `192.168.1.0/24` | Your home network range, in CIDR notation |
-| `LAN_GATEWAY` | `192.168.1.254` | Your router, which hands out IP addresses and knows device names |
+| `LAN_SUBNET` | `192.0.2.0/24` | Your home network range, in CIDR notation |
+| `LAN_GATEWAY` | `192.0.2.1` | Your router, which hands out IP addresses and knows device names |
 | `LAN_DOMAIN` | `lan` | The local domain your router gives out. On NetworkManager systems: `nmcli device show \| grep -i domain`. Otherwise, check your router's settings. |
 | `PIHOLE_APP_SUDO` | `false` | Leave it `false` unless you run two Pi-holes and sync them. Then set `true` on the backup only. See [Running a second Pi-hole](#running-a-second-pi-hole). |
 
@@ -202,7 +204,7 @@ Every `FTLCONF_<section>_<key>` variable in the compose file maps onto Pi-hole's
 | Pi-hole's own DNSSEC off | Unbound already validates and refuses forged answers. Turning it on in Pi-hole too only adds the `ad` flag to replies and BOGUS labels in the query log. There's no extra protection. |
 | `FTLCONF_misc_privacylevel: '0'` | The query log shows every domain and which device asked. You need that to fix blocklist breakage. 0 is already the default; setting it explicitly records the decision and locks it. If other people use your network, tell them what's logged. |
 | `FTLCONF_database_maxDBdays: '14'` | Keeps 14 days of query history instead of the default 91. That's plenty for troubleshooting, and it means less browsing history sitting on disk. |
-| `FTLCONF_dns_revServers: 'true,${LAN_SUBNET},${LAN_GATEWAY}#53,${LAN_DOMAIN}'` | Conditional forwarding. Pi-hole asks your router which device owns which IP, so the dashboard shows "iPhone" instead of `192.168.1.50`. The format is `<enabled>,<range>,<server>#<port>,<domain>`. Keep the `/24` on the range: without it, Pi-hole treats it as a single IP. |
+| `FTLCONF_dns_revServers: 'true,${LAN_SUBNET},${LAN_GATEWAY}#53,${LAN_DOMAIN}'` | Conditional forwarding. Pi-hole asks your router which device owns which IP, so the dashboard shows "iPhone" instead of `192.0.2.50`. The format is `<enabled>,<range>,<server>#<port>,<domain>`. Keep the `/24` on the range: without it, Pi-hole treats it as a single IP. |
 | `depends_on` with `condition: service_healthy` | On `docker compose up`, Pi-hole waits until Unbound is actually answering. Note this is a Compose feature only: after a host reboot, Docker restarts containers in no particular order. |
 
 ### Unbound settings
@@ -231,6 +233,7 @@ Image source: <https://github.com/klutchell/unbound-docker>
 ```
 network-stack/
 ├── docker-compose.yaml
+├── docker-compose.override.yaml   # optional local additions; never committed
 ├── .env                  # your real values; never committed
 ├── .env.example          # template with placeholder values
 ├── pihole/               # Pi-hole's data, created on first start; never committed
@@ -260,25 +263,73 @@ The two Pi-holes don't share anything by themselves, so I copy the lists from th
 - **Set `PIHOLE_APP_SUDO=true` in the backup's `.env`, and only there.** By default an app password can read but not change anything, so the sync fails with a `403` the moment it writes to the backup. This setting lets app passwords make changes. Keep it `false` on the primary, which only ever gets read.
 - **The passwords cross your network unencrypted.** The dashboards here run on plain HTTP, so every sync sends both app passwords across your LAN in the clear. On a home network I'm accepting that for now. Putting the dashboards behind a reverse proxy with TLS fixes it.
 
+## Using a reverse proxy?
+
+If you run a reverse proxy like Caddy, Traefik or Nginx Proxy Manager, every service name needs to point at the proxy. The proxy then sends each name to the right service. You could add a Local DNS record in the dashboard for every new service, but one wildcard rule does it for all of them:
+
+```
+address=/lab.home.arpa/192.0.2.10
+```
+
+That's a raw dnsmasq line (dnsmasq is the DNS engine inside Pi-hole). It answers `lab.home.arpa` and every name under it with the proxy's IP. `jellyfin.lab.home.arpa`, `photos.lab.home.arpa` and anything else you make up later all go to the proxy. Adding a service only means editing the proxy's config. Pi-hole never needs to change.
+
+Pi-hole's dashboard has no wildcard option, so the line goes in the `misc.dnsmasq_lines` setting. I set it in a Compose override file instead of the main compose file. Compose merges `docker-compose.override.yaml` in automatically, the `.gitignore` keeps it out of Git, and `git pull` keeps working without conflicts. It also leaves the setting alone for anyone who doesn't run a proxy, since setting it from compose locks it in the dashboard.
+
+To turn it on:
+
+1. Add the line to `.env`, with your proxy's real IP:
+
+```
+   PIHOLE_DNSMASQ_LINES=address=/lab.home.arpa/192.0.2.10
+```
+
+2. Create `docker-compose.override.yaml` next to the compose file:
+
+```yaml
+   services:
+     pihole:
+       environment:
+         FTLCONF_misc_dnsmasq_lines: ${PIHOLE_DNSMASQ_LINES}
+```
+
+3. Check that Compose picked it up, then recreate the container:
+
+```bash
+   docker compose config | grep dnsmasq_lines    # your line, filled in
+   docker compose up -d
+```
+
+   `docker compose restart` isn't enough, because it doesn't pick up new environment variables.
+
+Then check it:
+
+```bash
+dig @127.0.0.1 anything.lab.home.arpa +short    # your proxy's IP
+dig @127.0.0.1 server.home.arpa +short          # still that server's own IP
+```
+
+What I learned setting it up:
+
+- **Use a subdomain, not your whole local domain.** My servers already have Local DNS records like `server.home.arpa`. A wildcard on all of `home.arpa` could catch those too and send my SSH sessions to the proxy. Putting services under `lab.home.arpa` keeps the two apart.
+- **`home.arpa` is the right name for a home network.** It's officially reserved for exactly this and costs nothing. Made-up endings like `.lab` or `.home` can collide with real domains later. A domain you own works too, and you only need one if you want trusted certificates from Let's Encrypt instead of your proxy's self-signed ones.
+- **A typo can take DNS down.** Pi-hole passes this line to dnsmasq without checking it, and a bad line can stop DNS from starting. If you run two Pi-holes, change one, test it, then do the other.
+- **Sync tools won't copy it.** It's a setting, not a list, so nebula-sync with the selective setup above leaves it alone. Give each Pi-hole its own override file and `.env` line, or names stop resolving whenever devices fall back to the backup.
+- **More than one line?** Write it as a block in the override file, one line each:
+
+```yaml
+  FTLCONF_misc_dnsmasq_lines: |-
+    address=/lab.home.arpa/192.0.2.10
+    some-other-line
+```
+
+This only covers the DNS half. Your proxy still needs its own config telling it which name goes to which service.
+
 ## Known limitations
 
 - **One server means one point of failure.** If it goes down, DNS stops working for every device using it. A second copy fixes that: see [Running a second Pi-hole](#running-a-second-pi-hole).
-- **IPv6 can bypass Pi-hole.** If your router advertises its own IPv6 DNS server, devices on automatic DNS may send some lookups there. Until your router can hand out Pi-hole's address, set DNS manually on each device and confirm with the leak test.
 - **Docker's SELinux support is off on my host**, so the bind mounts don't use `:z`/`:Z` labels. If you enable it, add them.
 - **Images use `:latest`.** Pin versions if you want updates to be deliberate.
 - **IPv6 can bypass Pi-hole.** If your router advertises its own IPv6 DNS server, devices on automatic DNS may send some lookups there. Setting DNS by hand doesn't always fix it: on Windows, manual IPv4 DNS leaves IPv6 DNS on automatic, and Windows prefers the router's IPv6 server. Check with `Get-DnsClientServerAddress`. If the IPv6 line lists your router, that device is skipping Pi-hole. Until your router can hand out Pi-hole's IPv6 address, turn IPv6 off on that adapter (as Administrator: `Disable-NetAdapterBinding -Name "Wi-Fi" -ComponentID ms_tcpip6`; `Enable-NetAdapterBinding` undoes it). iPhone manual DNS replaces both, so phones aren't affected the same way. Confirm every device with the leak test.
-
-## Running a second Pi-hole?
-
-One Pi-hole is one point of failure. I run this same stack on two machines, a Raspberry Pi as the primary and a VM as the backup, and give my devices both addresses. If one stops answering, devices switch to the other on their own.
-
-The two Pi-holes don't share anything by themselves, so I copy the lists from the primary to the backup with nebula-sync. It runs in its own container on the primary, outside this project, since most people using this repo run one Pi-hole and don't need it. What I learned setting it up:
-
-It's one-way. Make every change on the primary. Each sync replaces the backup's lists, so anything added only on the backup disappears. Before the first sync, copy any allow/deny entries that exist only on the backup over to the primary.
-Sync lists, not settings. I use selective sync (FULL_SYNC=false) with only the SYNC_GRAVITY_* options on: groups, blocklists, allow/deny entries and clients, plus RUN_GRAVITY=true so the backup rebuilds its list database afterwards. Settings stay owned by each machine's compose file. A full sync would try to overwrite settings this compose file locks.
-Use app passwords, not your login. In each Pi-hole: Settings → Web interface / API, switch from Basic to Expert, then Configure app password. It's shown once, so put it straight into a password manager. You can revoke it any time without changing your real login.
-Set PIHOLE_APP_SUDO=true in the backup's .env, and only there. By default an app password can read but not change anything, so the sync fails with a 403 the moment it writes to the backup. This setting lets app passwords make changes. Keep it false on the primary, which only ever gets read.
-The passwords cross your network unencrypted. The dashboards here run on plain HTTP, so every sync sends both app passwords across your LAN in the clear. On a home network I'm accepting that for now. Putting the dashboards behind a reverse proxy with TLS fixes it.
 
 ## Roadmap
 
@@ -286,5 +337,4 @@ The passwords cross your network unencrypted. The dashboards here run on plain H
 - Enable Docker's SELinux support, with `:z`/`:Z` labels on every mount
 - Pin image versions
 - Consider dropping StevenBlack, since HaGeZi's wildcard rules already cover most of it
-- Add a Caddy reverse proxy to this project (as `caddy/`)
 - Move routing and DHCP to pfSense: put the ISP gateway in passthrough mode, have pfSense hand out Pi-hole as DNS over both IPv4 and IPv6, enable IPv6 on the Docker network, and block outbound DNS (ports 53 and 853) from everything except Pi-hole
