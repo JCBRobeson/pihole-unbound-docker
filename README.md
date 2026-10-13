@@ -248,7 +248,7 @@ Each service gets its own subfolder. I keep the project in `/srv/network-stack`.
 
 - **Never commit `.env` or `pihole/`.** `.env` holds your password. `pihole/` holds the query database, a record of every domain every device looked up.
 - The `.gitignore` works as an allowlist: it ignores everything, then lets through only the files meant to be public. A new file stays out of Git until you deliberately add it.
-- Home network addresses like `192.168.x.x` aren't sensitive, but they still live in `.env` so the compose file works for anyone.
+- Home network addresses like `192.0.2.x` aren't sensitive, but they still live in `.env` so the compose file works for anyone.
 - Nothing in this repo should ever contain a public IP address, a MAC address or a credential.
 
 ## Running a second Pi-hole?
