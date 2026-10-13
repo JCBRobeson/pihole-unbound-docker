@@ -763,5 +763,5 @@ The RTC battery is a nice extra, mainly for a Pi that's been unplugged for days.
 - A Tailscale node, as a second way in when the main server is down
 - A UPS with NUT, so everything shuts down cleanly on low battery, with the Pi as the NUT server since it outlasts everything else
 - High-endurance SD card, or NVMe
-- Caddy for HTTPS dashboards
+- Caddy for HTTPS dashboards (incoming reverse proxy) and automatic Let's Encrypt certificates for the Pi-holes' names
 - Turn this README into an Ansible playbook
