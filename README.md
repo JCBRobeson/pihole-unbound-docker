@@ -171,11 +171,11 @@ Confirm Pi-hole picked up the settings from `.env` and compose:
 ```bash
 docker exec pihole pihole-FTL --config dns.revServers        # your conditional forwarding string
 docker exec pihole pihole-FTL --config database.maxDBdays    # 14
-dig @127.0.0.1 -x <a-device-ip> +short                        # that device's name, from your router
+dig @127.0.0.1 -x 192.0.2.50 +short                           # use a real device's IP: you get its name, from your router
 ```
 `-x` is a reverse lookup: you give it an IP and get back a name. It only works for devices that got their address from your router over DHCP. Anything with a static IP, like the server itself, comes back blank because the router never learned its name. Pi-hole's **Settings → Local DNS Records** fixes that.
 
-For comparison, try `dig @<your-router-ip> dnssec-failed.org | grep status`. Many ISP routers return `NOERROR`, meaning they hand out the forged answer. Mine did.
+For comparison, try `dig @192.0.2.1 dnssec-failed.org | grep status`, with your router's IP. Many ISP routers return `NOERROR`, meaning they hand out the forged answer. Mine did.
 
 Then test from a real device. Set its DNS to your server's IP, browse for a bit, and run the **Extended test** at [dnsleaktest.com](https://www.dnsleaktest.com). The only IP listed should be your own public IP. The ISP column will show your ISP's name, which is expected: it's just who owns your IP address.
 
@@ -322,7 +322,7 @@ What I learned setting it up:
     some-other-line
 ```
 
-This only covers the DNS half. Your proxy still needs its own config telling it which name goes to which service.
+This only covers the DNS half. Your proxy still needs its own config telling it which name goes to which service. My setup, with Caddy and real Let's Encrypt certificates on a domain I own, is in [caddy](https://github.com/JCBRobeson/caddy).
 
 ## Known limitations
 
@@ -338,3 +338,4 @@ This only covers the DNS half. Your proxy still needs its own config telling it 
 - Pin image versions
 - Consider dropping StevenBlack, since HaGeZi's wildcard rules already cover most of it
 - Move routing and DHCP to pfSense: put the ISP gateway in passthrough mode, have pfSense hand out Pi-hole as DNS over both IPv4 and IPv6, enable IPv6 on the Docker network, and block outbound DNS (ports 53 and 853) from everything except Pi-hole
+- Put the dashboards behind a reverse proxy with HTTPS, so logins and sync passwords stop crossing the LAN in plain text

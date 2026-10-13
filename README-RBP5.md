@@ -441,7 +441,7 @@ The first line should be `[✓] DNS resolution is available` with no `✗` befor
 
 I added the lists by hand instead of importing a Teleporter backup from the other Pi-hole. A Teleporter export contains your whole Pi-hole setup, likely including a hash of the admin password, so that's one fewer sensitive file to handle and clean up. If you do use Teleporter, delete the export afterwards and never commit it.
 
-The dashboard is plain HTTP, so the password crosses your LAN unencrypted. That's a common tradeoff at home. A reverse proxy with HTTPS (Caddy) is on the roadmap.
+The dashboard is plain HTTP, so the password crosses your LAN unencrypted. That's a common tradeoff at home. Caddy now runs on this Pi for my other services (chapter 17); putting the dashboards behind it is next.
 
 ## 14. Point devices at it, and test failover
 
@@ -659,7 +659,7 @@ In the Pi's dashboard: **Settings → Local DNS Records**. These are **A records
 
 Swap in your own names and addresses. Add them on the primary only. The sync (next part) copies them to the backup, so there's one source of truth.
 
-There's also a **CNAME** section on the same page: an alias that points one name at another name, never at an IP (`dns.home.arpa` → `lantern.home.arpa`). If a machine's address changes, you update one A record and every alias follows. In Pi-hole, a CNAME's target has to be one of your local records. I'll use these for the reverse proxy later.
+There's also a **CNAME** section on the same page: an alias that points one name at another name, never at an IP (`dns.home.arpa` → `lantern.home.arpa`). If a machine's address changes, you update one A record and every alias follows. In Pi-hole, a CNAME's target has to be one of your local records. For the reverse proxy I ended up using one wildcard rule instead, so new services never need a record (chapter 17).
 
 Test on the Pi:
 
@@ -713,6 +713,47 @@ This host key is known by the following other names/addresses:
 
 Same key means same machine. Say yes. If that line isn't there, compare fingerprints first with `ssh-keygen -lF 192.168.1.12`.
 
+## 17. Caddy: HTTPS for everything else
+
+This Pi is also the house's reverse proxy. Caddy holds one wildcard certificate from Let's Encrypt and forwards names like `app.example.com` to the right server and port, so my apps get real HTTPS and a lock icon instead of `http://192.168.1.11:8096`. Nothing is opened to the internet: Caddy proves I own the domain through a DNS record in Route 53, not by being reachable.
+
+Why here: Caddy is infrastructure every other service depends on, like DNS. It belongs on the always-on box, not the experiment box.
+
+The full setup is in my [caddy](https://github.com/JCBRobeson/caddy) repo. The Pi-specific parts:
+
+```bash
+sudo mkdir /srv/caddy
+sudo chown youruser:youruser /srv/caddy
+git clone https://github.com/JCBRobeson/caddy.git /srv/caddy
+cd /srv/caddy
+cp .env.example .env
+chmod 600 .env
+cp conf/Caddyfile.example conf/Caddyfile
+```
+
+- **Its own AWS key.** The Pi gets a key that belongs to it alone, limited to writing one TXT record. The secret goes straight into `.env` and nowhere else.
+- **The first build is slow on a Pi.** It compiles Caddy with the Route 53 module. A few minutes is normal.
+- **Ports 80 and 443 must be free.** That's why the Pi-hole dashboard sits on 8053.
+- **Never copy or delete the `caddy_data` volume.** It holds the certificate and its private key. Losing it means requesting a new one and risking Let's Encrypt's rate limits.
+
+**Pointing names at Caddy.** Every name under the domain needs to reach this Pi. One dnsmasq rule does it, set through an override file next to the Pi-hole compose file (the pihole-unbound-docker README has the details):
+
+```
+PIHOLE_DNSMASQ_LINES=address=/example.com/192.168.1.12
+```
+
+**Do it on both Pi-holes.** nebula-sync doesn't copy this setting. If only the Pi has it, every device that falls back to the backup loses all the names.
+
+**Testing from the Pi itself.** The Pi uses Quad9 for its own DNS (chapter 6), so it can't look up these names. That's expected. Test by telling `curl` where to go:
+
+```bash
+curl -I --resolve app.example.com:443:192.168.1.12 https://app.example.com
+```
+
+`--resolve` skips DNS for that one request. `-I` fetches only the headers. A `200` or a redirect means Caddy and the certificate both work.
+
+**Still open:** the apps behind Caddy can also be reached directly over plain HTTP from anywhere on the LAN, which skips Caddy entirely. The fix is a firewall rule on each app's server that only lets this Pi in.
+
 ## Maintenance
 
 **Automatic, daily:** Debian security fixes and point releases. Never reboots.
@@ -726,6 +767,8 @@ sudo apt update && sudo apt full-upgrade && sudo reboot
 This picks up everything the automatic updates skip: the Pi's kernel and firmware, and Docker. A Docker update restarts every container, including Pi-hole, so do it when a short DNS blip won't bother anyone.
 
 nebula-sync is pinned, so it never updates by itself. Every few months, check its [releases page](https://github.com/lovelaze/nebula-sync/releases), read the notes, change the version in the compose file, then `sudo docker compose pull && sudo docker compose up -d`.
+
+Caddy is built locally, so `docker compose pull` does nothing for it. Every few months, read the Caddy and route53 module release notes, then in `/srv/caddy`: `sudo docker compose build --pull && sudo docker compose up -d`. Certificates live in the `caddy_data` volume, so rebuilds never touch them.
 
 Occasionally check power and heat with `vcgencmd get_throttled` and `vcgencmd measure_temp`.
 
@@ -755,6 +798,8 @@ The RTC battery is a nice extra, mainly for a Pi that's been unplugged for days.
 - nebula-sync publishes no ports, can't gain privileges, and runs a pinned version
 - Git can't stamp a guessed identity onto commits
 - Nothing forwarded from the router
+- Caddy uses its own AWS key, limited to one TXT record in one zone, stored only in `.env` (mode 600)
+- One wildcard certificate, so public certificate logs don't list my services; nothing forwarded from the router
 
 ## Roadmap
 
@@ -763,5 +808,6 @@ The RTC battery is a nice extra, mainly for a Pi that's been unplugged for days.
 - A Tailscale node, as a second way in when the main server is down
 - A UPS with NUT, so everything shuts down cleanly on low battery, with the Pi as the NUT server since it outlasts everything else
 - High-endurance SD card, or NVMe
-- Caddy for HTTPS dashboards (incoming reverse proxy) and automatic Let's Encrypt certificates for the Pi-holes' names
+- Put the Pi-hole dashboards behind Caddy (chapter 17)
+- Firewall the app servers so only Caddy can reach them
 - Turn this README into an Ansible playbook
