@@ -328,14 +328,32 @@ This only covers the DNS half. Your proxy still needs its own config telling it 
 
 - **One server means one point of failure.** If it goes down, DNS stops working for every device using it. A second copy fixes that: see [Running a second Pi-hole](#running-a-second-pi-hole).
 - **Docker's SELinux support is off on my host**, so the bind mounts don't use `:z`/`:Z` labels. If you enable it, add them.
-- **Images use `:latest`.** Pin versions if you want updates to be deliberate.
 - **IPv6 can bypass Pi-hole.** If your router advertises its own IPv6 DNS server, devices on automatic DNS may send some lookups there. Setting DNS by hand doesn't always fix it: on Windows, manual IPv4 DNS leaves IPv6 DNS on automatic, and Windows prefers the router's IPv6 server. Check with `Get-DnsClientServerAddress`. If the IPv6 line lists your router, that device is skipping Pi-hole. Until your router can hand out Pi-hole's IPv6 address, turn IPv6 off on that adapter (as Administrator: `Disable-NetAdapterBinding -Name "Wi-Fi" -ComponentID ms_tcpip6`; `Enable-NetAdapterBinding` undoes it). iPhone manual DNS replaces both, so phones aren't affected the same way. Confirm every device with the leak test.
+
+## Updating
+
+The compose file pins exact image versions, so updates only happen when you decide.
+
+1. **Export a backup first** from **Settings → Teleporter**. Treat the file as a secret: it includes your admin password hash.
+2. **Check for new versions** on Pi-hole's [releases page](https://github.com/pi-hole/docker-pi-hole/releases) and the [klutchell/unbound tags](https://hub.docker.com/r/klutchell/unbound/tags).
+3. **Update both `image:` tags** in `docker-compose.yaml`, then:
+
+    docker compose pull
+    docker compose up -d
+
+4. **Rerun the checks** from [Testing it](#testing-it). At minimum, `dig @127.0.0.1 example.com +short` should return an address.
+5. **Running two Pi-holes?** Update one, test it, then do the other. Your devices keep a working DNS server the whole time.
+
+What I learned:
+
+- **Unbound's image has no version label**, so `docker inspect` comes back blank. Ask the binary instead: `docker exec unbound unbound -V | head -n 1`. The Docker Hub tags follow the same number.
+- **Right after a restart, the first `dig` can time out.** Pi-hole is still starting up. Wait for `docker compose ps` to show `healthy` and try again.
+- **Pinning to the version you're already on may not recreate the container.** Compose sees the same image and leaves it running, still labeled `:latest`. `docker compose up -d --force-recreate` fixes the label.
 
 ## Roadmap
 
 - Set Docker log size limits
 - Enable Docker's SELinux support, with `:z`/`:Z` labels on every mount
-- Pin image versions
 - Consider dropping StevenBlack, since HaGeZi's wildcard rules already cover most of it
 - Move routing and DHCP to pfSense: put the ISP gateway in passthrough mode, have pfSense hand out Pi-hole as DNS over both IPv4 and IPv6, enable IPv6 on the Docker network, and block outbound DNS (ports 53 and 853) from everything except Pi-hole
 - Put the dashboards behind a reverse proxy with HTTPS, so logins and sync passwords stop crossing the LAN in plain text
